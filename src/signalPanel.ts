@@ -1,13 +1,17 @@
-import type { Evidence } from './story';
-import { MODEL_LABEL, SignalClient, checkWebGPU, scriptedAnswer, validate, type Mode, type Verdict } from './signal/signal';
+import { FACTS, type Evidence } from './story';
+import { describePhase, type LoadSnapshot } from './signal/progress';
+import { MODEL_LABEL, SignalClient, checkWebGPU, lookupFact, scriptedAnswer, validate, type Mode, type Verdict } from './signal/signal';
 
+const gb = (bytes: number) => (bytes / 1e9).toFixed(2);
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
 interface Entry {
   q: string;
-  source: 'model' | 'scripted';
+  source: 'model' | 'scripted' | 'lookup';
   streaming: string;
   raw?: string;
+  /** For lookups: the evidence item the answer was taken from. */
+  sourceEvidence?: Evidence;
   verdict?: Verdict;
   meta?: string;
   error?: string;
@@ -32,10 +36,10 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
   const entries: Entry[] = [];
   let gpu: { ok: boolean; reason: string; fp16?: boolean } | null = null;
   let statusText = '';
-  let pct = 0;
-  let bytes = '';
+  let snap: LoadSnapshot | null = null;
   let usedModel = false;
   let usedScripted = false;
+  let usedLookup = false;
 
   const client = new SignalClient({
     onMode: () => render(),
@@ -45,13 +49,13 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
       if (el) el.textContent = t;
       else render();
     },
-    onProgress: (p, loaded, total) => {
-      pct = p;
-      bytes = `${(loaded / 1e9).toFixed(2)} / ${(total / 1e9).toFixed(2)} GB`;
+    onProgress: (s) => {
+      snap = s;
       const bar = root.querySelector<HTMLElement>('#sig-bar');
       if (bar) {
-        bar.style.width = `${p}%`;
-        root.querySelector('#sig-bytes')!.textContent = `${p.toFixed(1)}% · ${bytes}`;
+        bar.style.width = `${s.percent}%`;
+        root.querySelector('#sig-bytes')!.textContent = bytesLine();
+        root.querySelector('#sig-status')!.textContent = describePhase(s);
       }
       updateBadges(client.mode);
     },
@@ -62,10 +66,15 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
     render();
   });
 
+  function bytesLine() {
+    if (!snap || snap.phase === 'resolving') return '0.0%';
+    return `${snap.percent.toFixed(1)}% · ${gb(snap.loaded)} / ${gb(snap.total)} GB`;
+  }
+
   function updateBadges(mode: Mode) {
     const labels: Record<Mode, string> = {
       off: 'OFFLINE',
-      loading: `LOADING ${pct.toFixed(0)}%`,
+      loading: `LOADING ${Math.floor(snap?.percent ?? 0)}%`,
       ready: 'GEMMA 4 E2B · LOCAL',
       generating: 'INFERRING…',
       error: 'ERROR',
@@ -86,10 +95,14 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
           : `<span class="s-bad">${esc(s.text)}<span class="why">removed: ${esc(s.reason ?? 'unsupported')}</span></span> `,
       )
       .join('');
-    return `<div class="a">${body || '<span class="s-bad">(empty response)</span>'}
+    const lookup = e.source === 'lookup';
+    const details = lookup && e.sourceEvidence
+      ? `<details class="context-note"><summary>source evidence</summary>[${e.sourceEvidence.id}] ${esc(e.sourceEvidence.text)}</details>`
+      : `<details class="context-note"><summary>raw output</summary>${esc(e.raw ?? '')}</details>`;
+    return `<div class="a${lookup ? ' lookup' : ''}">${lookup ? '<div class="src-tag">EVIDENCE LOOKUP · NOT GENERATED</div>' : ''}${body || '<span class="s-bad">(empty response)</span>'}
       <div class="verdict ${e.verdict.status}">${VERDICT_TEXT[e.verdict.status]}</div>
       <div class="context-note">${esc(e.meta ?? '')}</div>
-      <details class="context-note"><summary>raw output</summary>${esc(e.raw ?? '')}</details></div>`;
+      ${details}</div>`;
   }
 
   function render() {
@@ -106,7 +119,7 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
         <p class="sig-intro">It only ever sees the evidence you have recovered, must cite it as [E1], [F2]…, and every sentence is checked against that evidence before you see it. It cannot solve the case: the transmitter checks the final sequence itself.</p>
         ${check}
         <div class="sig-actions">
-          <button class="btn-ghost" id="sig-load" ${gpu?.ok ? '' : 'disabled'}>LOAD GEMMA 4 E2B · ~3.4 GB, CACHED AFTER FIRST RUN</button>
+          <button class="btn-ghost" id="sig-load" ${gpu?.ok ? '' : 'disabled'}>LOAD GEMMA 4 E2B · ~3.1 GB, CACHED AFTER FIRST RUN</button>
           <button class="btn-ghost amber" id="sig-script">USE SCRIPTED PREVIEW (NO AI)</button>
         </div>
         <p class="context-note">The download comes from the Hugging Face Hub and is stored in the browser cache. No questions or evidence are sent to any server.</p>`;
@@ -120,9 +133,9 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
     if (mode === 'loading') {
       root.innerHTML = `
         <div class="banner local">Loading ${MODEL_LABEL} onto WebGPU. Local inference is NOT running yet.</div>
-        <div class="progress"><i id="sig-bar" style="width:${pct}%"></i></div>
-        <div class="status-line" id="sig-bytes">${pct.toFixed(1)}% ${bytes ? '· ' + bytes : ''}</div>
-        <div class="status-line" id="sig-status" style="margin-top:8px">${esc(statusText || 'Starting worker…')}</div>
+        <div class="progress"><i id="sig-bar" style="width:${snap?.percent ?? 0}%"></i></div>
+        <div class="status-line" id="sig-bytes">${bytesLine()}</div>
+        <div class="status-line" id="sig-status" style="margin-top:8px">${esc(snap ? describePhase(snap) : statusText || 'Starting worker…')}</div>
         <p class="context-note">You can close this panel and keep exploring while the model downloads.</p>`;
       return;
     }
@@ -141,7 +154,7 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
 
     const banner = mode === 'scripted'
       ? `<div class="banner scripted">SCRIPTED PREVIEW · rule-based replies stitched from recovered evidence. No language model is running.</div>`
-      : `<div class="banner local">LOCAL INFERENCE · ${MODEL_LABEL} · WebGPU ${client.dtype}${client.lastTps ? ` · ${client.lastTps.toFixed(1)} tok/s` : ''}</div>`;
+      : `<div class="banner local">READY · LOCAL INFERENCE · ${MODEL_LABEL} · WebGPU ${client.dtype} · ${gb(client.loadedBytes)} GB loaded in ${client.loadSeconds.toFixed(0)} s${client.lastTps ? ` · ${client.lastTps.toFixed(1)} tok/s` : ''}</div>`;
     const busy = mode === 'generating';
     root.innerHTML = `${banner}
       <div class="chat" id="sig-chat">${entries.map((e) => `<div><div class="q">${esc(e.q)}</div>${renderAnswer(e)}</div>`).join('') || '<p class="sig-intro">Ask about the evidence you have recovered.</p>'}</div>
@@ -169,6 +182,21 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
 
   async function ask(q: string) {
     const ev = getEvidence();
+    const hit = lookupFact(q, ev, FACTS);
+    if (hit) {
+      usedLookup = true;
+      entries.push({
+        q,
+        source: 'lookup',
+        streaming: '',
+        raw: hit.raw,
+        verdict: hit.verdict,
+        sourceEvidence: hit.source,
+        meta: `Evidence lookup · exact fact from ${hit.source.id} (${hit.source.title}) · deterministic, no language model used for this reply`,
+      });
+      render();
+      return;
+    }
     if (client.mode === 'scripted') {
       usedScripted = true;
       const raw = scriptedAnswer(q, ev);
@@ -201,6 +229,12 @@ export function initSignalPanel(root: HTMLElement, modeEl: HTMLElement, badgeEl:
   return {
     focus: () => render(),
     summary: () =>
-      usedModel ? 'local Gemma 4 E2B consulted' : usedScripted ? 'scripted preview only (no AI)' : 'not consulted',
+      usedModel
+        ? 'local Gemma 4 E2B consulted'
+        : usedScripted
+          ? 'scripted preview only (no AI)'
+          : usedLookup
+            ? 'evidence lookup only (no AI)'
+            : 'not consulted',
   };
 }

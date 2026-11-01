@@ -7,8 +7,10 @@ import {
   InterruptableStoppingCriteria,
   TextStreamer,
 } from '@huggingface/transformers';
+import { LoadProgress, type ProgressEvent } from './progress';
 
 const MODEL_ID = 'onnx-community/gemma-4-E2B-it-ONNX';
+const PROGRESS_INTERVAL_MS = 100;
 
 type InMsg =
   | { type: 'load' }
@@ -30,28 +32,33 @@ async function load() {
   const dtype = fp16 ? 'q4f16' : 'q4';
   post({ type: 'status', text: `WebGPU adapter ready · shader-f16 ${fp16 ? 'yes' : 'no'} · dtype ${dtype}` });
 
-  tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
+  const progress = new LoadProgress();
+  let lastPost = 0;
+  const report = (force = false) => {
+    const now = performance.now();
+    if (!force && now - lastPost < PROGRESS_INTERVAL_MS) return;
+    lastPost = now;
+    post({ type: 'progress', snapshot: progress.snapshot() });
+  };
+  const progress_callback = (info: ProgressEvent) => {
+    progress.update(info);
+    report(info.status === 'done');
+  };
+
+  // The tokenizer goes through the same callback so its files count towards the total.
   // Gemma4ForCausalLM loads the text-only path (embed_tokens + decoder) and skips
   // the vision and audio encoders, which roughly halves the download.
-  model = await Gemma4ForCausalLM.from_pretrained(MODEL_ID, {
-    dtype,
-    device: 'webgpu',
-    progress_callback: (info: any) => {
-      if (info.status === 'progress_total') {
-        const active = Object.entries(info.files ?? {})
-          .filter(([, f]: [string, any]) => f.total && f.loaded < f.total)
-          .map(([name]) => name.split('/').pop());
-        post({ type: 'progress', progress: info.progress, loaded: info.loaded, total: info.total });
-        if (active.length) post({ type: 'status', text: `Downloading ${active.join(', ')}` });
-      } else if (info.status === 'initiate' && info.file) {
-        post({ type: 'status', text: `Fetching ${info.file}` });
-      }
-    },
-  });
+  [tokenizer, model] = await Promise.all([
+    AutoTokenizer.from_pretrained(MODEL_ID, { progress_callback }),
+    Gemma4ForCausalLM.from_pretrained(MODEL_ID, { dtype, device: 'webgpu', progress_callback }),
+  ]);
 
-  post({ type: 'status', text: 'Compiling WebGPU shaders (warm-up)…' });
+  progress.warmup();
+  report(true);
   const warm = tokenizer('a', { return_tensor: true });
   await model.generate({ ...warm, max_new_tokens: 1 });
+  progress.ready();
+  report(true);
   post({ type: 'ready', dtype });
 }
 

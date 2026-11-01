@@ -18,7 +18,7 @@ Built for Hacktoberfest 2026, Week 4. Vite + TypeScript + Three.js. No backend, 
 
 ## Quick start
 
-Requires Node.js 20.19+ or 22.12+ (Vite 8). Developed on Node 25; CI builds on Node 22.
+Requires Node.js 20.19+ or 22.12+ (Vite 8). The tests need Node 22.18+, which runs TypeScript directly. Developed on Node 25; CI builds on Node 22.
 
 ```bash
 npm install
@@ -29,13 +29,14 @@ Production build:
 
 ```bash
 npm run build      # type-checks with tsc, then bundles into dist/
+npm test           # validator, evidence lookup and load-progress tests (node:test, no extra dependencies)
 ```
 
 `dist/` is a static site. It has to be served over **https** or from **localhost** because WebGPU needs a secure context.
 
 ### Deployment (GitHub Pages)
 
-Production builds use the base path `/DEAD-AIR/` (see `vite.config.ts`), so the site lives at `https://techgendm.github.io/DEAD-AIR/`. The dev server still runs at `/`. `.github/workflows/deploy.yml` runs `npm ci` and `npm run build`, then publishes `dist/` on every push to `main`, or when triggered by hand.
+Production builds use the base path `/DEAD-AIR/` (see `vite.config.ts`), so the site lives at `https://techgendm.github.io/DEAD-AIR/`. The dev server still runs at `/`. `.github/workflows/deploy.yml` runs `npm ci`, `npm test` and `npm run build`, then publishes `dist/` on every push to `main`, or when triggered by hand.
 
 The repository's Pages source must be set to **GitHub Actions** (Settings → Pages). To host somewhere else, change `base` in `vite.config.ts` to that path.
 
@@ -47,6 +48,13 @@ python3 -m http.server 4173 --directory /tmp/site   # http://localhost:4173/DEAD
 ```
 
 (With the `/DEAD-AIR/` base, Vite 8's `vite preview` returns 404 for the main module script when the browser sends `Sec-Fetch-Dest: script`, so use a plain static server.)
+
+**Runtime dependencies.** `dist/` holds only the game and the AI worker. Two things are fetched at runtime, and only when THE SIGNAL is loaded:
+
+- **Model files** from the Hugging Face Hub.
+- **ONNX Runtime WebAssembly** (`ort-wasm-simd-threaded.asyncify.wasm` and `.mjs`, about 27 MB uncompressed) from **jsDelivr**, at the onnxruntime-web version Transformers.js was built against. This is Transformers.js's default (`env.backends.onnx.wasm.wasmPaths`), and the deployed site was verified working with it. `vite.config.ts` resolves onnxruntime-web with its `onnxruntime-web-use-extern-wasm` condition, so Vite doesn't emit an unused local copy of the WASM. After the first load, Transformers.js serves the WASM from the browser cache.
+
+If jsDelivr or Hugging Face is unreachable, the model can't load. The game and the scripted preview still work.
 
 ## Controls
 
@@ -100,9 +108,12 @@ src/
   audio.ts              procedural WebAudio: mains hum, radio static, carrier tone (no audio files)
   signalPanel.ts        THE SIGNAL drawer UI: load flow, progress, chat, per-sentence verdicts
   signal/
-    signal.ts           WebGPU check, prompt builder, evidence validator, scripted preview, worker client
+    signal.ts           WebGPU check, prompt builder, evidence validator, evidence lookup, scripted preview,
+                        worker client
+    progress.ts         turns Transformers.js download events into one honest progress figure
     ai.worker.ts        Transformers.js + Gemma 4 E2B in a Web Worker (keeps the 3D loop smooth)
   style.css             charcoal / amber / radio-green HUD
+test/                   node:test regression tests for the validator, evidence lookup and load progress
 ```
 
 - **Everything is procedural.** The room, racks, CRTs, the parabolic dish (a `LatheGeometry`), the pines, the textures (canvas noise) and the audio. There are no downloaded 3D, image or sound assets.
@@ -112,9 +123,13 @@ src/
  player actions ──► state.discover(ids) ──► HUD / evidence file
                                    │
                                    ▼ discovered evidence only
- question ──► buildMessages() ──► ai.worker (Gemma 4 E2B, WebGPU) ──► raw text
-                                                                       │
-                                     validate(raw, discovered) ◄───────┘
+ question ──► lookupFact() ── direct question about an exact fact (FACTS in story.ts)
+                 │              whose evidence is discovered? ──► canonical statement + [ID] ──┐
+                 │ otherwise                                       "EVIDENCE LOOKUP"          │
+                 ▼                                                                             │
+              buildMessages() ──► ai.worker (Gemma 4 E2B, WebGPU) ──► raw text                 │
+                                                                       │                       │
+                                     validate(raw, discovered) ◄───────┴───────────────────────┘
                                        │ per-sentence: cited? cited item discovered?
                                        │ numbers & proper nouns present in evidence?
                                        ▼
@@ -128,40 +143,65 @@ src/
 | Model | **Gemma 4 E2B instruction-tuned** by Google DeepMind ([`onnx-community/gemma-4-E2B-it-ONNX`](https://huggingface.co/onnx-community/gemma-4-E2B-it-ONNX)), Apache 2.0 |
 | Runtime | [Transformers.js](https://github.com/huggingface/transformers.js) `@huggingface/transformers` 4.3, ONNX Runtime Web, **WebGPU** backend |
 | Precision | `q4f16` when the GPU supports `shader-f16`, otherwise `q4` |
-| Download | ~3.4 GB on first use (text-only path), then served from the browser cache |
+| Download | ~3.1 GB on first use (3.13 GB measured, text-only path), then served from the browser cache |
 | Where it runs | A dedicated Web Worker in your tab. Questions and evidence never leave the machine. |
 
-**How it loads.** Nothing is fetched until you open THE SIGNAL (`T`) and press *Load Gemma 4 E2B*. The worker loads the model with `Gemma4ForCausalLM`, which in Transformers.js runs Gemma 4 in **text-only mode**: just `embed_tokens` and `decoder_model_merged`. That skips the vision and audio encoders, which this game doesn't need. The panel shows byte-level download progress, the file currently being fetched, a shader warm-up step, and then generation status with tokens/sec. If loading or inference fails, the actual error message is shown.
+**How it loads.** Nothing is fetched until you open THE SIGNAL (`T`) and press *Load Gemma 4 E2B*. The worker loads the model with `Gemma4ForCausalLM`, which in Transformers.js runs Gemma 4 in **text-only mode**: just `embed_tokens` and `decoder_model_merged`. That skips the vision and audio encoders, which this game doesn't need. The panel shows the bytes of the files actually requested (the tokenizer, config and the two text-only ONNX sessions), the files still transferring, then *creating WebGPU sessions* and *shader warm-up*. Downloading fills the bar to 95%, session creation shows 96%, warm-up 98%, and the panel only switches to **READY** (with the loaded size and load time) once warm-up has finished. Transformers.js's own aggregate counts the vision and audio encoders too, which are never downloaded, so it isn't used. During generation the panel shows tokens/sec. If loading or inference fails, the actual error message is shown.
 
 **Grounding contract.** The model only sees what the player has recovered:
 
 1. The system prompt contains **only discovered evidence**, each item tagged with its ID (`[E1]`, `[F2]`…). Undiscovered evidence is never sent. The panel footer lists exactly which IDs went into the context.
-2. The model is told to end every sentence with the evidence IDs it relies on, to use no outside facts, and to answer `NO SIGNAL ON THAT BAND.` when the evidence doesn't cover the question. It's also told not to declare the final fragment order.
-3. Every reply goes through `validate()` (`src/signal/signal.ts`) before it's displayed. A sentence is **removed and struck through, with the reason shown**, if:
+2. **Exact facts are looked up, not generated.** A direct question about one of a few canonical facts (`FACTS` in `src/story.ts`: the carrier frequency, the filter band, the night operator, when TX-2 was last keyed, the signal's time offset) is answered with that fact's fixed statement, cited with the ID of the discovered evidence it comes from. For example, *"What frequency should I tune TX-2 to?"* gets *"The carrier was logged on 7.317 MHz. [E1]"*. These replies are labelled **EVIDENCE LOOKUP · NOT GENERATED**, show the source evidence, and still go through the validator. Questions that are interpretive (*why*, *what does … mean*), match several facts or none, mention a name or number the evidence doesn't contain, or concern undiscovered evidence go to Gemma.
+3. The model is told to end every sentence with the evidence IDs it relies on, to use no outside facts, and to answer `NO SIGNAL ON THAT BAND.` when the evidence doesn't cover the question. It's also told not to declare the final fragment order.
+4. Every reply goes through `validate()` (`src/signal/signal.ts`) before it's displayed. A sentence is **removed and struck through, with the reason shown**, if:
    - it has no evidence reference,
    - it cites an ID that doesn't exist or hasn't been discovered,
    - it contains a number (year, time, frequency) that isn't in the evidence it cites, or
    - it uses a proper noun that appears nowhere in the discovered evidence.
-4. Each answer gets a verdict: **VERIFIED**, **PARTIAL**, **REJECTED** or **NO SIGNAL**. The raw model output stays available under *raw output* for transparency.
-5. The final transmission is checked by the game (`isCorrectOrder`), never by the model.
+5. Each answer gets a verdict: **VERIFIED**, **PARTIAL**, **REJECTED** or **NO SIGNAL**. The raw model output stays available under *raw output* for transparency.
+6. The final transmission is checked by the game (`isCorrectOrder`), never by the model.
 
-**Verified run (2026-11-01, Chrome on macOS, WebGPU with shader-f16, `q4f16`):** a cold load, including the ~3.4 GB download and shader warm-up, took 279 s. Answers took 1–2.5 s at 28–33 tokens/s. With E1–E3 in context:
+The validator splits sentences on `.`, `!` and `?`, but not after initials (*M. Okafor*), titles (*Dr.*, *Mr.*, *Prof.*…) or abbreviations followed by lowercase text (*e.g.*, *a.m.*). `npm test` covers citation checks, undiscovered and nonexistent IDs, unsupported numbers and names, PARTIAL verdicts and these splitting rules.
+
+### Live verification on GitHub Pages
+
+Tested on **November 1, 2026** at https://techgendm.github.io/DEAD-AIR/:
+
+| | |
+|---|---|
+| Browser | Chrome 156 on Apple Silicon (macOS) |
+| WebGPU adapter | Apple, Metal 3 (`metal-3`), `shader-f16` supported |
+| Model | Gemma 4 E2B, `q4f16`, text-only path |
+| Cold load | **283 s** from pressing *Load* to ready, including download and shader warm-up |
+| Model data transferred | **~3.13 GB** (vision and audio encoders not downloaded) |
+| Generation | **27.6–36.7 tokens/s** across the tested questions, 1.0–2.8 s per answer |
+| Network | 0 failed requests, 0 HTTP 4xx/5xx, 0 CORS errors |
+
+With E1–E3 in context:
 
 - *"Where is the carrier coming from?"* → three cited sentences (E1, E1, E3) → **VERIFIED**
+- *"What frequency should I tune TX-2 to?"* → grounded but unhelpful at the time: Gemma said twice that monitoring 7.317 MHz is prohibited [E3]. Since then this question is answered by evidence lookup with *"The carrier was logged on 7.317 MHz. [E1]"*.
 - *"Who sent the signal from Mars?"* → `NO SIGNAL ON THAT BAND.`
+- *"The night operator was Dr. Harold Vance and he saw aliens in 1985, right?"* → `NO SIGNAL ON THAT BAND.`
+
+![THE SIGNAL running Gemma 4 E2B on the GitHub Pages deployment](docs/screenshots/15-signal-live-github-pages.jpg)
+
+The progress, WASM, lookup and validator changes were checked in the same browser against the production build served on the same origin, with the model loaded from the browser cache: the bar went 0 → 93 → 96 (sessions) → 98 (warm-up) → READY, showing 3.13 / 3.13 GB, and Gemma answered at 32–37 tokens/s.
+
+**Not verified:** Windows, Linux, other browsers (Edge, Safari, Firefox), GPUs without `shader-f16` (the `q4` path), and integrated or low-memory GPUs. An earlier run on `localhost` (same machine) is shown below.
 
 ![THE SIGNAL running Gemma 4 E2B locally](docs/screenshots/14-signal-gemma-local.jpg)
 
-**Scripted preview (no AI).** If WebGPU is missing, the model fails to load, or you just don't want a 3.4 GB download, choose *Use scripted preview*. It's a small rule-based responder that stitches together sentences from recovered evidence and runs them through the same validator. It is **clearly labelled** "SCRIPTED PREVIEW · No language model is running" in the panel, in the HUD badge and on the ending screen. The UI never shows "local inference" unless the Gemma worker has actually reported `ready`.
+**Scripted preview (no AI).** If WebGPU is missing, the model fails to load, or you just don't want a 3.1 GB download, choose *Use scripted preview*. It's a small rule-based responder that stitches together sentences from recovered evidence and runs them through the same validator. Evidence lookups work in this mode too. It is **clearly labelled** "SCRIPTED PREVIEW · No language model is running" in the panel, in the HUD badge and on the ending screen. The UI never shows "local inference" unless the Gemma worker has actually reported `ready`.
 
 ## Browser requirements
 
 | Feature | Requirement |
 |---|---|
 | Game (3D, puzzles, scripted preview) | Any modern desktop browser with WebGL 2 and Pointer Lock (Chrome, Edge, Firefox, Safari) |
-| THE SIGNAL with Gemma 4 E2B | A WebGPU browser: **Chrome / Edge 113+** on desktop (best support). Safari 26+ and Firefox 141+ (Windows) ship WebGPU, but this project was only verified in Chrome. |
+| THE SIGNAL with Gemma 4 E2B | A WebGPU browser: **Chrome / Edge 113+** on desktop (best support). Safari 26+ and Firefox 141+ (Windows) ship WebGPU, but this project was only verified in Chrome 156 on macOS (Apple Silicon). |
 | GPU memory | Plan for roughly **4 GB** of free GPU/unified memory for `q4f16` |
-| Disk | ~3.4 GB browser cache for the model files |
+| Disk | ~3.1 GB browser cache for the model files |
 | Context | `https://` or `localhost` (WebGPU requires a secure context) |
 
 Mouse and keyboard are required. Touch devices are not supported.
@@ -176,19 +216,19 @@ The screenshots in `docs/screenshots/` were captured from this build. To record 
 4. Walk to the green CRT bank (left wall) → `E` → demodulate CH1 → choose band 2 on CH2.
 5. Walk to the TX-2 cabinet (back right) → `E` → tune toward 7.317. Listen to the static fade into a tone, then hold.
 6. Back to the monitor → capture CH3.
-7. Press `T`. Either load Gemma 4 E2B (first load takes a while, then it's cached) or pick the scripted preview, and ask *"Where is the carrier coming from?"*. Point out the citation chips and verdict line. Ask something off-topic (*"Who sent the signal from Mars?"*) to show the refusal or rejection.
+7. Press `T`. Either load Gemma 4 E2B (first load takes a while, then it's cached) or pick the scripted preview, and ask *"Where is the carrier coming from?"*. Point out the citation chips and verdict line. Ask *"What frequency should I tune TX-2 to?"* to show an evidence lookup. Ask something off-topic (*"Who sent the signal from Mars?"*) to show the refusal or rejection.
 8. Return to TX-2 → **Reconstruct**. Try a wrong order first to show the deterministic rejection, then the correct one for the ending.
 
 ## Known limitations
 
-- **Model size and first load.** ~3.4 GB is a heavy first download, and loading plus shader compilation can take minutes on slower connections or GPUs. Low-memory GPUs may fail to allocate. The error is shown and the scripted preview remains available.
+- **Model size and first load.** ~3.1 GB is a heavy first download, and loading plus shader compilation can take minutes on slower connections or GPUs. Low-memory GPUs may fail to allocate. The error is shown and the scripted preview remains available.
 - **The validator is heuristic, not proof.** It catches missing citations, wrong citations, unsupported numbers and invented proper nouns. It can't catch a claim made only of common words that misstates the evidence (for example, lowercase "aliens"), and it can be overly strict when the model paraphrases a number (for example, "3:17" vs "03:17").
-- Validated answers are grounded but not always *helpful*. In testing, Gemma repeated a cited sentence instead of directly answering a tuning question. The validator checks that claims are supported, not that the answer is good.
+- Validated answers are grounded but not always *helpful*. The validator checks that claims are supported, not that the answer is good. Evidence lookup fixes this for the listed exact facts only. Its question matching is a short hand-written table, so other phrasings go to Gemma.
 - Small models sometimes ignore the citation format. Those sentences get struck out rather than shown as fact, so some answers come back **REJECTED**.
 - No save system. Progress resets on reload. A playthrough takes about 5–10 minutes.
 - Desktop only (pointer lock plus keyboard). No gamepad or touch controls.
 - Pressing `Esc` to close a panel can't always recapture the mouse (browser rule). Click **Resume** or the scene.
-- The ONNX Runtime WebAssembly file (~27 MB) ships in `dist/` alongside the app bundle. The Three.js bundle is ~600 kB (157 kB gzipped).
+- THE SIGNAL depends on two third-party hosts at runtime: Hugging Face for the model and jsDelivr for the ONNX Runtime WebAssembly. The Three.js bundle is ~610 kB (158 kB gzipped).
 
 ## License
 

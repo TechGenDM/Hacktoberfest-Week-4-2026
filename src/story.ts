@@ -91,6 +91,58 @@ export const FRAGMENTS: Record<string, Fragment> = {
   },
 };
 
+/**
+ * Exact facts THE SIGNAL answers by evidence lookup instead of generation. A question is routed
+ * here only when it opens with `asks`, mentions `about` and matches no other fact. The answer is
+ * the statement of the first discovered evidence item in `statements`, cited with that item's ID.
+ * Each statement must hold up under the validator against its own evidence (see test/facts.test.ts).
+ */
+export interface Fact {
+  id: string;
+  asks: RegExp;
+  about: RegExp;
+  statements: [evidenceId: string, statement: string][];
+}
+
+export const FACTS: Fact[] = [
+  {
+    id: 'carrier-frequency',
+    asks: /^(what|which)\b/,
+    about: /\b(frequenc\w*|mhz|tune|tuning|dial)\b/,
+    statements: [
+      ['E1', `The carrier was logged on ${TARGET_FREQUENCY} MHz.`],
+      ['E5', `TX-2's dial was left at ${TARGET_FREQUENCY} MHz.`],
+    ],
+  },
+  {
+    id: 'filter-band',
+    asks: /^(what|which)\b/,
+    about: /\b(filter|band)\b/,
+    statements: [['E2', 'The operator routed the signal monitor to filter band 2.']],
+  },
+  {
+    id: 'night-operator',
+    asks: /^who\b/,
+    about: /\boperator\b/,
+    statements: [
+      ['E1', 'The operator on duty was M. Okafor.'],
+      ['E3', 'The night operator was M. Okafor.'],
+    ],
+  },
+  {
+    id: 'tx2-last-keyed',
+    asks: /^(when|what time|at what time)\b/,
+    about: /\bkeyed\b/,
+    statements: [['E5', 'TX-2 was last keyed on 14 MAR 1979 at 03:34.']],
+  },
+  {
+    id: 'signal-offset',
+    asks: /^(how|when)\b/,
+    about: /\b(early|earlier|before it is transmitted|offset|minutes)\b/,
+    statements: [['E4', 'The signal is received 17 minutes before it is transmitted.']],
+  },
+];
+
 export function getItem(id: string): Evidence | undefined {
   return EVIDENCE[id] ?? FRAGMENTS[id];
 }
