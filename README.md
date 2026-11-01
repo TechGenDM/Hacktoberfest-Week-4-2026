@@ -18,7 +18,7 @@ Built for Hacktoberfest 2026, Week 4. Vite + TypeScript + Three.js. No backend, 
 
 ## Quick start
 
-Requires Node.js 20+ (developed on Node 25).
+Requires Node.js 20.19+ or 22.12+ (Vite 8). Developed on Node 25; CI builds on Node 22.
 
 ```bash
 npm install
@@ -29,10 +29,24 @@ Production build:
 
 ```bash
 npm run build      # type-checks with tsc, then bundles into dist/
-npm run preview    # serves dist/ on http://localhost:4173
 ```
 
-`dist/` is a static site. Any static host works (GitHub Pages, Netlify and so on). It has to be served over **https** or from **localhost** because WebGPU needs a secure context.
+`dist/` is a static site. It has to be served over **https** or from **localhost** because WebGPU needs a secure context.
+
+### Deployment (GitHub Pages)
+
+Production builds use the base path `/DEAD-AIR/` (see `vite.config.ts`), so the site lives at `https://techgendm.github.io/DEAD-AIR/`. The dev server still runs at `/`. `.github/workflows/deploy.yml` runs `npm ci` and `npm run build`, then publishes `dist/` on every push to `main`, or when triggered by hand.
+
+The repository's Pages source must be set to **GitHub Actions** (Settings → Pages). To host somewhere else, change `base` in `vite.config.ts` to that path.
+
+To check a production build locally, serve `dist/` under `/DEAD-AIR/`, the same way Pages does:
+
+```bash
+mkdir -p /tmp/site && rm -rf /tmp/site/DEAD-AIR && cp -R dist /tmp/site/DEAD-AIR
+python3 -m http.server 4173 --directory /tmp/site   # http://localhost:4173/DEAD-AIR/
+```
+
+(With the `/DEAD-AIR/` base, Vite 8's `vite preview` returns 404 for the main module script when the browser sends `Sec-Fetch-Dest: script`, so use a plain static server.)
 
 ## Controls
 
