@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dead Air — The Last Frequency</title>
+    <meta name="description" content="A first-person radio-observatory mystery with an optional local AI assistant (Gemma 4 E2B on WebGPU)." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230b0c0e'/%3E%3Cpath d='M3 18 Q8 6 12 18 T21 18 T29 14' stroke='%235dffa0' stroke-width='2.5' fill='none'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;600&family=Special+Elite&family=Cormorant+Garamond:ital,wght@0,500;1,500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="fx-vignette"></div>
+    <div class="fx-scan"></div>
+    <div class="fx-grain"></div>
+
+    <!-- Title -->
+    <section id="title" class="screen">
+      <div class="title-inner">
+        <div class="eyebrow">KESTREL RIDGE RADIO OBSERVATORY · DECOMMISSIONED 1979</div>
+        <h1>DEAD AIR</h1>
+        <div class="subtitle">THE LAST FREQUENCY</div>
+        <div class="clock-line"><span class="rec"></span> 03:17 AM — a transmission begins on a band that should be silent.</div>
+        <button id="start" class="btn-primary">START INVESTIGATION</button>
+        <div class="controls-grid">
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move</div>
+          <div><kbd>Mouse</kbd> look</div>
+          <div><kbd>E</kbd> interact</div>
+          <div><kbd>J</kbd> evidence</div>
+          <div><kbd>T</kbd> THE SIGNAL</div>
+          <div><kbd>Shift</kbd> walk faster</div>
+          <div><kbd>Esc</kbd> pause / close</div>
+        </div>
+        <p class="fine">Headphones recommended. The optional AI assistant runs Gemma 4 E2B locally in your browser and only loads when you ask for it.</p>
+      </div>
+    </section>
+
+    <!-- HUD -->
+    <section id="hud" class="hidden">
+      <div class="hud-tl">
+        <div class="hud-loc">KESTREL RIDGE · CONTROL HALL</div>
+        <div class="hud-time" id="hud-time">03:17:00</div>
+      </div>
+      <div class="hud-tr">
+        <div class="hud-label">SIGNAL RECOVERY <span id="hud-pct">0%</span></div>
+        <div class="pips" id="pips"></div>
+        <div class="hud-obj"><span>NEXT</span> <em id="hud-obj"></em></div>
+      </div>
+      <div class="crosshair" id="crosshair"></div>
+      <div class="prompt hidden" id="prompt"><kbd>E</kbd> <span></span></div>
+      <div class="hud-bl">
+        <span><kbd>J</kbd> Evidence <b id="ev-count">0</b></span>
+        <span><kbd>T</kbd> The Signal <b id="sig-badge">offline</b></span>
+        <span><kbd>Esc</kbd> Pause</span>
+      </div>
+      <div id="toasts"></div>
+    </section>
+
+    <!-- Station modal -->
+    <section id="modal" class="hidden">
+      <div class="modal-card">
+        <header>
+          <div class="modal-kicker" id="modal-kicker"></div>
+          <h2 id="modal-title"></h2>
+          <button class="close" data-close>Close <kbd>Esc</kbd></button>
+        </header>
+        <div class="modal-body" id="modal-body"></div>
+      </div>
+    </section>
+
+    <!-- Evidence drawer -->
+    <aside id="evidence" class="drawer right hidden">
+      <header>
+        <div class="modal-kicker">CASE FILE · 14 MAR 1979</div>
+        <h2>Evidence</h2>
+        <button class="close" data-close>Close <kbd>J</kbd></button>
+      </header>
+      <div id="evidence-list" class="drawer-body"></div>
+    </aside>
+
+    <!-- THE SIGNAL drawer -->
+    <aside id="signal" class="drawer left hidden">
+      <header>
+        <div class="modal-kicker">LOCAL INFERENCE · NO SERVER</div>
+        <h2>The Signal <span class="mode" id="sig-mode">OFFLINE</span></h2>
+        <button class="close" data-close>Close <kbd>T</kbd></button>
+      </header>
+      <div class="drawer-body" id="signal-body"></div>
+    </aside>
+
+    <!-- Pause -->
+    <section id="pause" class="screen hidden">
+      <div class="title-inner">
+        <div class="eyebrow">PAUSED</div>
+        <button id="resume" class="btn-primary">RESUME</button>
+        <p class="fine">Click resume to recapture the mouse.</p>
+      </div>
+    </section>
+
+    <!-- Ending -->
+    <section id="ending" class="screen hidden">
+      <div class="title-inner ending-inner">
+        <div class="eyebrow">FINAL TRANSMISSION · RECONSTRUCTED</div>
+        <blockquote id="final-text"></blockquote>
+        <p id="epilogue" class="epilogue"></p>
+        <div id="ending-stats" class="fine"></div>
+        <button class="btn-primary" onclick="location.reload()">LISTEN AGAIN</button>
+      </div>
+    </section>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
