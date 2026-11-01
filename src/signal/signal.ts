@@ -1,4 +1,5 @@
-import type { Evidence } from '../story';
+import type { Evidence, Fact } from '../story';
+import type { LoadSnapshot } from './progress';
 
 export const MODEL_LABEL = 'Gemma 4 E2B (onnx-community/gemma-4-E2B-it-ONNX)';
 export const NO_SIGNAL = 'NO SIGNAL ON THAT BAND.';
@@ -64,6 +65,18 @@ export interface Verdict {
 const CITE_RE = /\[([A-Z]\d+(?:\s*[,;]\s*[A-Z]?\d+)*)\]/g;
 const WORD_WHITELIST = new Set(['I', 'THE', 'SIGNAL', 'NO', 'ON', 'THAT', 'BAND', 'MHz', 'TX', 'CH', 'T', 'AM']);
 
+// A title is always followed by a name, so its period never ends a sentence ("Dr. Vance").
+const TITLES = ['Dr', 'Mr', 'Mrs', 'Ms', 'Mx', 'Prof', 'Sr', 'Jr', 'St', 'Lt', 'Capt', 'Sgt', 'Col', 'Gen', 'Rev'];
+// These only end a sentence when a capitalised word follows ("e.g. the dish" vs "at 3 a.m. The log").
+const ABBREVIATIONS = ['e\\.g', 'i\\.e', 'vs', 'approx', 'cf', 'No', 'a\\.m', 'p\\.m'];
+const SENTENCE_BREAK = new RegExp(
+  '(?<=[.!?])' +
+    '(?<!\\b[A-Z]\\.)' + // initials: "M. Okafor"
+    `(?<!\\b(?:${TITLES.join('|')})\\.)` +
+    `(?<!\\b(?:${ABBREVIATIONS.join('|')})\\.(?=\\s+[a-z0-9]))` +
+    '\\s+|\\n+',
+);
+
 /**
  * Checks a model answer against discovered evidence. Each sentence must cite discovered
  * evidence, and any number or proper noun it uses must occur in the cited/discovered text.
@@ -84,7 +97,7 @@ export function validate(raw: string, evidence: Evidence[]): Verdict {
   // move trailing citations inside the sentence: "foo. [E1]" -> "foo [E1]."
   const normalized = text.replace(/([.!?])\s*((?:\[[^\]]+\]\s*,?\s*)+)/g, ' $2$1 ');
   const parts = normalized
-    .split(/(?<=[.!?])(?<!\b[A-Z]\.)\s+|\n+/)
+    .split(SENTENCE_BREAK)
     .map((s) => s.trim())
     .filter((s) => s.length > 1);
 
@@ -121,6 +134,52 @@ export function validate(raw: string, evidence: Evidence[]): Verdict {
   const okCount = sentences.filter((s) => s.ok).length;
   const status = okCount === 0 ? 'rejected' : okCount === sentences.length ? 'verified' : 'partial';
   return { sentences, status };
+}
+
+// ------------------------------------------------------------------ evidence lookup
+
+// Questions about meaning or cause need reasoning, so they always go to the model.
+const INTERPRETIVE = /\b(why|how come|mean|means|meaning|explain|significan\w*|imply|implies|cause[sd]?|happen\w*)\b/;
+
+export interface Lookup {
+  fact: string;
+  raw: string;
+  verdict: Verdict;
+  source: Evidence;
+}
+
+/** A name or number in the question that no discovered evidence mentions, i.e. a premise we can't vouch for. */
+function foreignTerm(question: string, corpus: string) {
+  return question
+    .split(/\s+/)
+    .slice(1)
+    .map((w) => w.replace(/['’]s\b/, '').replace(/[^A-Za-z0-9.:-]/g, '').replace(/[.:-]+$/, ''))
+    .find((w) => (/^[A-Z][a-z]{2,}/.test(w) || /\d/.test(w)) && !WORD_WHITELIST.has(w) && !corpus.includes(w.toLowerCase()));
+}
+
+/**
+ * Answers a direct question about an exact game fact straight from discovered evidence, so the
+ * answer can't drift the way a small model's paraphrase can. Returns null, leaving the question to
+ * the model, when the question is interpretive, matches no fact or more than one, carries a name or
+ * number the evidence doesn't contain, the fact's evidence hasn't been discovered, or the answer
+ * would not pass the validator.
+ */
+export function lookupFact(question: string, evidence: Evidence[], facts: Fact[]): Lookup | null {
+  const q = question.trim().toLowerCase();
+  if (INTERPRETIVE.test(q)) return null;
+  const matches = facts.filter((f) => f.asks.test(q) && f.about.test(q));
+  if (matches.length !== 1) return null;
+
+  const corpus = evidence.map(describe).join(' ').toLowerCase();
+  if (foreignTerm(question.trim(), corpus)) return null;
+
+  const found = matches[0].statements.find(([id]) => evidence.some((e) => e.id === id));
+  if (!found) return null;
+  const [id, statement] = found;
+  const raw = `${statement} [${id}]`;
+  const verdict = validate(raw, evidence);
+  if (verdict.status !== 'verified') return null;
+  return { fact: matches[0].id, raw, verdict, source: evidence.find((e) => e.id === id)! };
 }
 
 // ------------------------------------------------------------------ scripted preview
@@ -169,13 +228,17 @@ export function scriptedAnswer(question: string, evidence: Evidence[]): string {
 export interface ClientEvents {
   onMode: (m: Mode) => void;
   onStatus: (text: string) => void;
-  onProgress: (pct: number, loaded: number, total: number) => void;
+  onProgress: (s: LoadSnapshot) => void;
 }
 
 export class SignalClient {
   mode: Mode = 'off';
   dtype = '';
   lastTps = 0;
+  /** Seconds from pressing load to READY, and the bytes of model files that were loaded. */
+  loadSeconds = 0;
+  loadedBytes = 0;
+  private loadStart = 0;
   private worker: Worker | null = null;
   private reqId = 0;
   private pending = new Map<number, { onToken: (t: string) => void; resolve: (s: string) => void; reject: (e: Error) => void; buf: string }>();
@@ -199,6 +262,7 @@ export class SignalClient {
   load(): Promise<void> {
     if (this.worker) return Promise.resolve();
     this.setMode('loading');
+    this.loadStart = performance.now();
     this.worker = new Worker(new URL('./ai.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e) => this.handle(e.data);
     this.worker.onerror = (e) => this.fail(e.message || 'Worker crashed while loading the model.');
@@ -221,10 +285,12 @@ export class SignalClient {
         this.ev.onStatus(m.text);
         break;
       case 'progress':
-        this.ev.onProgress(m.progress, m.loaded, m.total);
+        this.loadedBytes = m.snapshot.loaded;
+        this.ev.onProgress(m.snapshot);
         break;
       case 'ready':
         this.dtype = m.dtype;
+        this.loadSeconds = (performance.now() - this.loadStart) / 1000;
         this.ev.onStatus(`Gemma 4 E2B loaded on WebGPU (${m.dtype}). Local inference ready.`);
         this.setMode('ready');
         this.loadWaiters?.resolve();
